@@ -14,17 +14,24 @@ st.markdown("Track **Sentiment (Volatility)** and **Capital Flows** for free.")
 ticker = st.sidebar.text_input("Enter ETF Ticker (e.g., PAVE, SMH, ICLN)", "PAVE").upper()
 period = st.sidebar.selectbox("Analysis Period", ["1mo", "3mo", "6mo", "1y"], index=1)
 
+# --- UPDATED CACHING SECTION ---
 @st.cache_data(ttl=3600)
 def get_etf_data(symbol):
     try:
-        etf = yf.Ticker(symbol)
-        hist = etf.history(period="1y")
-        info = etf.info
-        return etf, hist, info
-    except:
-        return None, None, None
+        ticker_obj = yf.Ticker(symbol)
+        # We only return the history and the info dictionary, 
+        # NOT the ticker_obj itself.
+        hist = ticker_obj.history(period="1y")
+        info = ticker_obj.info
+        return hist, info
+    except Exception as e:
+        return None, None
 
-etf_obj, hist, info = get_etf_data(ticker)
+# Updated call (removed etf_obj)
+hist, info = get_etf_data(ticker)
+# ------------------------------
+
+
 
 if hist is not None and not hist.empty:
     # --- CALCULATIONS ---
