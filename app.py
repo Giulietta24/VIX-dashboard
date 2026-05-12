@@ -13,7 +13,6 @@ except:
     st.stop()
 
 st.set_page_config(page_title="ETF Sentiment Terminal", layout="wide")
-
 ticker = st.sidebar.text_input("Enter Ticker", "SPY").upper()
 
 # --- 2. DATA ENGINE ---
@@ -51,7 +50,7 @@ if status == "OK":
 
     st.title(f"📈 {ticker} Intelligence Terminal")
     
-    # Metrics
+    # Header Metrics
     flow_val = df['Net_Flow'].iloc[-1]
     flow_disp = f"${flow_val/1e9:.2f}B" if abs(flow_val) >= 1e9 else f"${flow_val/1e6:.1f}M"
     
@@ -60,59 +59,48 @@ if status == "OK":
     c2.metric("Fear Index (VIX)", f"{df['Vol'].iloc[-1]:.1f}%")
     c3.metric("Daily Money Flow", flow_disp)
 
-    # --- CHART 1: SENTIMENT & FLOW (LIGHT MODE) ---
-    st.subheader("💳 Institutional Sentiment & Price Action")
+    # --- CHART 1: FLOW ---
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    
-    # Price Line (Dark Blue for visibility on white)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", 
-                             line=dict(color="#003366", width=3)), secondary_y=False)
-    
-    # Net Flow Bars
+    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", line=dict(color="#003366", width=3)), secondary_y=False)
     recent = df.tail(60)
     fig.add_trace(go.Bar(x=recent.index, y=recent['Net_Flow'], name="Net Flow", 
-                         marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), 
-                         opacity=0.5), secondary_y=True)
+                         marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), opacity=0.5), secondary_y=True)
+    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", line=dict(color="#007bff", width=2)), secondary_y=True)
     
-    # Flow Trend Line (Bright Blue)
-    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", 
-                             line=dict(color="#007bff", width=2)), secondary_y=True)
-    
-    # Layout Adjustments for White Background
-    fig.update_layout(
-        template="plotly_white", # Switch to white template
-        height=500, 
-        hovermode="x unified",
-        paper_bgcolor="white", 
-        plot_bgcolor="white",
-        font=dict(color="black"), # All text to black
-        legend=dict(orientation="h", y=1.1, font=dict(color="black"))
-    )
-
-    fig.update_yaxes(title_text="Price ($)", secondary_y=False, showgrid=True, gridcolor='lightgray', title_font=dict(color="black"), tickfont=dict(color="black"))
-    fig.update_yaxes(title_text="Capital Flow ($)", secondary_y=True, tickformat="~s", showgrid=False, title_font=dict(color="black"), tickfont=dict(color="black"))
-    fig.update_xaxes(showgrid=True, gridcolor='lightgray', tickfont=dict(color="black"))
-    
+    fig.update_layout(template="plotly_white", height=500, hovermode="x unified", paper_bgcolor="white", plot_bgcolor="white", font=dict(color="black"))
+    fig.update_yaxes(tickformat="~s", secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- CHART 2: FEAR (LIGHT MODE) ---
-    st.subheader("🔥 Dynamic Panic Threshold")
+    # --- CHART 2: FEAR ---
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=df.index, y=df['Vol'], name="Volatility", fill='tozeroy', line=dict(color="orange")))
     fig2.add_trace(go.Scatter(x=df.index, y=df['Threshold'], name="Panic Line", line=dict(color="red", dash="dash")))
-    
-    fig2.update_layout(
-        template="plotly_white", 
-        height=350, 
-        paper_bgcolor="white", 
-        plot_bgcolor="white",
-        font=dict(color="black"),
-        legend=dict(orientation="h", y=1.1, font=dict(color="black"))
-    )
-    fig2.update_yaxes(title_text="Volatility %", gridcolor='lightgray', tickfont=dict(color="black"))
-    fig2.update_xaxes(gridcolor='lightgray', tickfont=dict(color="black"))
-    
+    fig2.update_layout(template="plotly_white", height=350, paper_bgcolor="white", plot_bgcolor="white", font=dict(color="black"))
     st.plotly_chart(fig2, use_container_width=True)
+
+    # --- 4. THE MISSING SUMMARY (Fixed & Visible) ---
+    st.divider()
+    st.subheader("💡 Terminal Summary")
+    
+    # Get latest values for the alert
+    curr_vol = df['Vol'].iloc[-1]
+    curr_thresh = df['Threshold'].iloc[-1]
+    curr_flow = df['Net_Flow'].iloc[-1]
+    
+    with st.container(border=True):
+        col_a, col_b = st.columns(2)
+        
+        # Volatility Alert
+        if curr_vol > curr_thresh:
+            col_a.error(f"⚠️ **VOLATILITY ALERT:** {ticker} is currently in a high-stress state, exceeding its dynamic threshold of {curr_thresh:.1f}%.")
+        else:
+            col_a.success(f"✅ **STABLE VOLATILITY:** {ticker} is trading within its normal risk range.")
+            
+        # Money Flow Alert
+        if curr_flow > 0:
+            col_b.info(f"💰 **BULLISH FLOW:** Institutional money is currently entering {ticker}.")
+        else:
+            col_b.warning(f"📉 **BEARISH FLOW:** Institutional money is currently exiting {ticker}.")
 
 elif status == "LIMIT":
     st.warning("⚠️ API Limit Reached.")
