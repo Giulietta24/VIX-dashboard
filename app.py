@@ -80,24 +80,70 @@ if status == "OK":
     m4.metric("Inst. Flow", flow_disp)
 
     # CHART 1: FLOW & WHALE MARKERS
-    st.subheader("💳 Institutional Flow & Whale Markers")
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", line=dict(color="#003366", width=3)), secondary_y=False)
-    
-    # Green Triangle Markers on Price
-    fig.add_trace(go.Scatter(x=df.index, y=df['Whale_Buy'], mode='markers', name='Whale Entry',
-                             marker=dict(color='#00ff00', size=12, symbol='triangle-up', line=dict(width=1, color='black'))), secondary_y=False)
-    
-    recent = df.tail(60)
-    fig.add_trace(go.Bar(x=recent.index, y=recent['Net_Flow'], name="Net Flow", 
-                         marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), opacity=0.4), secondary_y=True)
-    
-    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", line=dict(color="#007bff", width=2)), secondary_y=True)
-    
-    fig.update_layout(template="plotly_white", height=450, paper_bgcolor="white", font=dict(color="black"), hovermode="x unified")
-    fig.update_yaxes(tickformat="~s", secondary_y=True)
-    st.plotly_chart(fig, use_container_width=True)
+    # --- CHART 1: FLOW & SIGNALS ---
+st.subheader("💳 Institutional Flow & Whale Markers")
+fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+# 1. Main Price Line (Always show)
+fig.add_trace(go.Scatter(
+    x=df.index, y=df['Close'], 
+    name="Price", 
+    showlegend=True,  # FORCE LEGEND
+    line=dict(color="#003366", width=3)
+), secondary_y=False)
+
+# 2. Whale Buy Markers
+fig.add_trace(go.Scatter(
+    x=df.index, y=df['Whale_Buy'], 
+    mode='markers', 
+    name='Whale Entry',
+    showlegend=True, # FORCE LEGEND
+    marker=dict(color='#00ff00', size=12, symbol='triangle-up', 
+    line=dict(width=1, color='black'))
+), secondary_y=False)
+
+# 3. Put/Call Data (The Checkbox Fix)
+# Use a checkbox to toggle visibility
+show_pc = st.checkbox("Show Put/Call Flow")
+
+if show_pc:
+    # Ensure you have your put_call_data defined earlier
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df['Put_Call_Flow'], # Replace with your actual column name
+        name="Put/Call Flow",
+        showlegend=True, # FORCE LEGEND
+        line=dict(color="purple", width=2, dash="dot")
+    ), secondary_y=True)
+
+# 4. Net Flow Bars
+recent = df.tail(60)
+fig.add_trace(go.Bar(
+    x=recent.index, y=recent['Net_Flow'], 
+    name="Net Flow", 
+    showlegend=True, # FORCE LEGEND
+    marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), 
+    opacity=0.4
+), secondary_y=True)
+
+# --- THE LEGEND FIX ---
+fig.update_layout(
+    template="plotly_white", 
+    height=500, 
+    showlegend=True, # FORCE THE GLOBAL LEGEND
+    legend=dict(
+        orientation="h",   # Horizontal legend
+        yanchor="bottom",
+        y=1.02,            # Place it above the chart
+        xanchor="right",
+        x=1
+    ),
+    paper_bgcolor="white", 
+    font=dict(color="black"), 
+    hovermode="x unified"
+)
+
+fig.update_yaxes(tickformat="~s", secondary_y=True)
+st.plotly_chart(fig, use_container_width=True)
 
     # CHART 2: FEAR GAUGE
     st.subheader("🔥 Dynamic Panic Threshold")
