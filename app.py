@@ -19,24 +19,33 @@ ticker = st.sidebar.text_input("Enter Ticker", "SPY").upper()
 @st.cache_data(ttl=3600)
 def get_alpha_data(symbol):
     try:
-        # Fetch Daily Adjusted Price
-        url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol}&apikey={AV_KEY}&outputsize=compact'
+        # Use TIME_SERIES_DAILY (Standard) instead of ADJUSTED for better free-tier compatibility
+        url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={AV_KEY}'
         r = requests.get(url)
         data = r.json()
         
-        # Check for Alpha Vantage Rate Limits
+        # 1. Check for Rate Limit Message
         if "Note" in data:
-            return "LIMIT", None
+            return "API Limit Reached. Wait 1 minute.", None
+        
+        # 2. Check for Invalid API Key or Ticker
+        if "Error Message" in data:
+            return "Invalid Ticker or API Key.", None
+            
+        # 3. Check if the key exists in the response
+        if 'Time Series (Daily)' not in data:
+            # This will show us what Alpha Vantage actually said
+            return f"Alpha Vantage Error: {list(data.keys())}", None
         
         df = pd.DataFrame.from_dict(data['Time Series (Daily)'], orient='index')
         df = df.astype(float)
         df.index = pd.to_datetime(df.index)
         df = df.sort_index()
         
-        # Standardize column names
+        # Map Alpha Vantage names to our dashboard names
         df = df.rename(columns={
             '1. open': 'Open', '2. high': 'High', 
-            '3. low': 'Low', '4. close': 'Close', '6. volume': 'Volume'
+            '3. low': 'Low', '4. close': 'Close', '5. volume': 'Volume'
         })
         return "OK", df
     except Exception as e:
