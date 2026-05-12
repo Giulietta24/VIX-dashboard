@@ -14,18 +14,29 @@ st.title("📊 ETF Capital Flow & Fear Tracker")
 ticker = st.sidebar.text_input("Enter Ticker (e.g., PAVE, SMH, SPY)", "PAVE").upper()
 
 # --- 2. DATA ENGINE (With Rate Limit Protection) ---
-@st.cache_data(ttl=86400) # Cache for 24 hours to avoid Yahoo Rate Limits
+@st.cache_data(ttl=86400) 
 def get_clean_data(symbol):
     try:
-        # Create a session to look like a browser
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-        
-        t = yf.Ticker(symbol, session=session)
+        # Simplified: No manual session. yfinance handles it better internally now.
+        t = yf.Ticker(symbol)
         hist = t.history(period="1y")
         
         if hist.empty:
             return None, None, None
+            
+        # Get Implied Volatility (IV)
+        iv = None
+        try:
+            if t.options:
+                opt = t.option_chain(t.options[0])
+                iv = (opt.calls['impliedVolatility'].median() + opt.puts['impliedVolatility'].median()) / 2 * 100
+        except:
+            iv = None
+                
+        return hist, t.info, iv
+    except Exception as e:
+        st.error(f"Data Fetch Error: {e}")
+        return None, None, None
             
         # Get Implied Volatility (IV)
         iv = None
