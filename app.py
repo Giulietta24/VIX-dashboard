@@ -40,7 +40,7 @@ def get_full_market_data(symbol):
         spy.index = pd.to_datetime(spy.index)
         spy = spy.sort_index()['4. close']
 
-        # Sync dates so both dataframes match
+        # Sync dates
         common_dates = df.index.intersection(spy.index)
         df = df.loc[common_dates]
         spy = spy.loc[common_dates]
@@ -49,29 +49,28 @@ def get_full_market_data(symbol):
     except Exception as e:
         return str(e), None, None
 
-# Trigger the Data Fetch
 status, df, spy_price = get_full_market_data(ticker)
 
-# --- 3. DASHBOARD LOGIC ---
+# --- 3. DASHBOARD LOGIC (All math must be inside here) ---
 if status == "OK":
-    # --- MATH SECTION (Placed here so 'df' is defined) ---
+    # --- MATH SECTION ---
     # A. Institutional Flow
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['Net_Flow'] = np.where(df['Close'] > df['Close'].shift(1), df['TP'] * df['Volume'], -df['TP'] * df['Volume'])
     df['Flow_EMA'] = df['Net_Flow'].ewm(span=10).mean()
 
-    # B. Relative Strength vs Market
+    # B. Relative Strength
     df['RS_Line'] = (df['Close'] / df['Close'].iloc[0]) / (spy_price / spy_price.iloc[0])
     
     # C. Relative Volume (RVOL)
     df['Avg_Vol'] = df['Volume'].rolling(20).mean()
     df['RVOL'] = df['Volume'] / df['Avg_Vol']
 
-    # D. Dynamic Volatility
+    # D. Volatility
     df['Vol'] = df['Close'].pct_change().rolling(20).std() * (252**0.5) * 100
     df['Threshold'] = df['Vol'].rolling(60).mean() + (1.5 * df['Vol'].rolling(60).std())
 
-    # --- 4. RENDER UI ---
+    # --- 4. UI RENDERING ---
     st.title(f"🚀 {ticker} Conviction Terminal")
     
     c1, c2, c3, c4 = st.columns(4)
@@ -90,29 +89,29 @@ if status == "OK":
     recent = df.tail(60)
     fig.add_trace(go.Bar(x=recent.index, y=recent['Net_Flow'], name="Net Flow", 
                          marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), opacity=0.4), secondary_y=True)
+    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", line=dict(color="#007bff", width=2)), secondary_y=True)
     
     fig.update_layout(template="plotly_white", height=500, paper_bgcolor="white", font=dict(color="black"), hovermode="x unified")
     fig.update_yaxes(tickformat="~s", secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- SUMMARY BOX ---
+    # Summary Box
     st.subheader("🎯 Conviction Summary")
     with st.container(border=True):
         col_a, col_b, col_c = st.columns(3)
-        
         curr_rvol = df['RVOL'].iloc[-1]
         curr_rs = df['RS_Line'].iloc[-1]
         curr_flow = df['Net_Flow'].iloc[-1]
 
         if curr_rvol > 1.5:
-            col_a.success(f"🐳 **WHALE ACTIVITY:** Volume is {curr_rvol:.1f}x average.")
+            col_a.success(f"🐳 **WHALE ACTIVITY:** {curr_rvol:.1f}x volume.")
         else:
-            col_a.info(f"🐟 **RETAIL VOLUME:** {curr_rvol:.1f}x average.")
+            col_a.info(f"🐟 **RETAIL VOLUME:** {curr_rvol:.1f}x volume.")
 
         if curr_rs > 1:
-            col_b.success("🏆 **OUTPERFORMING:** Beating the SPY.")
+            col_b.success("🏆 **OUTPERFORMING SPY**")
         else:
-            col_b.error("📉 **LAGGING:** Weaker than SPY.")
+            col_b.error("📉 **LAGGING MARKET**")
 
         if curr_rvol > 1.2 and curr_rs > 1 and curr_flow > 0:
             col_c.markdown("### 🏹 SIGNAL: BUY")
@@ -122,8 +121,6 @@ if status == "OK":
             col_c.markdown("### ⚖️ SIGNAL: WAIT")
 
 elif status == "LIMIT":
-    st.warning("⚠️ Alpha Vantage Limit. Please wait a minute and refresh.")
-elif status == "INVALID":
-    st.error("❌ Ticker not found. Please try another.")
+    st.warning("⚠️ Alpha Vantage Daily Limit. Please wait a minute or upgrade.")
 else:
     st.error(f"Error: {status}")
