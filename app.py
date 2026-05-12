@@ -14,7 +14,7 @@ except:
     st.stop()
 
 st.set_page_config(page_title="High-Certainty Terminal", layout="wide")
-ticker = st.sidebar.text_input("Enter Ticker", "SPY").upper()
+ticker = st.sidebar.text_input("Enter Ticker", "HIMS").upper()
 
 # --- 2. DATA ENGINE ---
 @st.cache_data(ttl=3600)
@@ -23,13 +23,13 @@ def get_full_market_data(symbol):
         url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={AV_KEY}'
         r = requests.get(url).json()
         if "Note" in r: return "LIMIT", None, None
+        if "Error Message" in r: return "INVALID", None, None
         
         df = pd.DataFrame.from_dict(r['Time Series (Daily)'], orient='index').astype(float)
         df.index = pd.to_datetime(df.index)
         df = df.sort_index().rename(columns={'1. open':'Open','2. high':'High','3. low':'Low','4. close':'Close','5. volume':'Volume'})
         
-        # Short delay to prevent API rejection for the benchmark
-        time.sleep(1.5)
+        time.sleep(1.5) # API Breathing Room
         
         url_spy = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&apikey={AV_KEY}'
         r_spy = requests.get(url_spy).json()
@@ -46,14 +46,20 @@ status, df, spy_price = get_full_market_data(ticker)
 
 # --- 3. DASHBOARD LOGIC ---
 if status == "OK":
-    # MATH
+    # --- UPDATED MATH (Faster Lookbacks) ---
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['Net_Flow'] = np.where(df['Close'] > df['Close'].shift(1), df['TP'] * df['Volume'], -df['TP'] * df['Volume'])
     df['Flow_EMA'] = df['Net_Flow'].ewm(span=10).mean()
     df['RS_Line'] = (df['Close'] / df['Close'].iloc[0]) / (spy_price / spy_price.iloc[0])
     df['RVOL'] = df['Volume'] / df['Volume'].rolling(20).mean()
     df['Vol'] = df['Close'].pct_change().rolling(20).std() * (252**0.5) * 100
-    df['Threshold'] = df['Vol'].rolling(60).mean() + (1.5 * df['Vol'].rolling(60).std())
+    
+    # Threshold reduced to 20 days so the red line shows up faster
+    df['Threshold'] = df['Vol'].rolling(20).mean() + (1.5 * df['Vol'].rolling(20).std())
+
+    # IDENTIFY BUY SIGNALS (Whale Buying Footprints)
+    # RVOL > 1.2 and Net Flow is Positive
+    df['Whale_Buy'] = np.where((df['Net_Flow'] > 0) & (df['RVOL'] > 1.2), df['Close'], np.nan)
 
     st.title(f"🚀 {ticker} Conviction Terminal")
     
@@ -67,18 +73,29 @@ if status == "OK":
     m3.metric("Fear Level", f"{df['Vol'].iloc[-1]:.1f}%")
     m4.metric("Inst. Flow", flow_disp)
 
-    # --- CHART 1: FLOW ---
+    # --- CHART 1: FLOW & SIGNALS ---
+    st.subheader("💳 Institutional Flow & Whale Markers")
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", line=dict(color="#003366", width=3)), secondary_y=False)
+    
+    # The Main Price Line
+    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", 
+                             line=dict(color="#003366", width=3)), secondary_y=False)
+    
+    # NEW: Whale Buy Markers (Green Triangles)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Whale_Buy'], mode='markers', name='Whale Entry',
+                             marker=dict(color='#00ff00', size=12, symbol='triangle-up', 
+                             line=dict(width=1, color='black'))), secondary_y=False)
     
     recent = df.tail(60)
+    # Net Flow Bars
     fig.add_trace(go.Bar(x=recent.index, y=recent['Net_Flow'], name="Net Flow", 
                          marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), opacity=0.4), secondary_y=True)
     
-    # Adding back the Trend Line
-    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", line=dict(color="#007bff", width=2)), secondary_y=True)
+    # Flow Trend Line
+    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", 
+                             line=dict(color="#007bff", width=2)), secondary_y=True)
     
-    fig.update_layout(template="plotly_white", height=450, paper_bgcolor="white", font=dict(color="black"), hovermode="x unified")
+    fig.update_layout(template="plotly_white", height=500, paper_bgcolor="white", font=dict(color="black"), hovermode="x unified")
     fig.update_yaxes(tickformat="~s", secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -90,17 +107,16 @@ if status == "OK":
     fig2.update_layout(template="plotly_white", height=300)
     st.plotly_chart(fig2, use_container_width=True)
 
-    # --- CONVICTION SUMMARY ---
+    # --- VERDICT ---
     st.subheader("🎯 Verdict")
-    curr_flow = df['Net_Flow'].iloc[-1]
-    curr_rvol = df['RVOL'].iloc[-1]
-    
-    if curr_flow > 0 and curr_rvol > 1.2:
-        st.success("🏹 **BUY SIGNAL:** Institutions are buying on high volume.")
-    elif curr_flow < 0 and curr_rvol > 1.2:
+    if not np.isnan(df['Whale_Buy'].iloc[-1]):
+        st.success("🏹 **ACTIVE BUY SIGNAL:** A high-volume Whale entry was detected today!")
+    elif flow_val > 0:
+        st.info("✅ **BULLISH BIAS:** Flow is positive, but waiting for high-volume Whale confirmation.")
+    elif flow_val < 0 and df['RVOL'].iloc[-1] > 1.2:
         st.error("🛡️ **SELL SIGNAL:** High-volume institutional exit detected.")
     else:
-        st.info("⚖️ **NEUTRAL:** No major whale activity detected right now.")
+        st.info("⚖️ **NEUTRAL:** No major institutional activity detected.")
 
 elif status == "LIMIT":
     st.error("🚨 API Limit Reached (25/day).")
