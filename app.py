@@ -49,33 +49,34 @@ def get_full_market_data(symbol):
     except Exception as e:
         return str(e), None, None
 
+# Trigger the Data Fetch
 status, df, spy_price = get_full_market_data(ticker)
 
-# --- 3. DASHBOARD LOGIC (All math must be inside here) ---
+# --- 3. DASHBOARD LOGIC (MATH LIVES HERE NOW) ---
 if status == "OK":
-    # --- MATH SECTION ---
-    # A. Institutional Flow
+    # A. Institutional Flow Logic
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['Net_Flow'] = np.where(df['Close'] > df['Close'].shift(1), df['TP'] * df['Volume'], -df['TP'] * df['Volume'])
     df['Flow_EMA'] = df['Net_Flow'].ewm(span=10).mean()
 
-    # B. Relative Strength
+    # B. Relative Strength (RS)
     df['RS_Line'] = (df['Close'] / df['Close'].iloc[0]) / (spy_price / spy_price.iloc[0])
     
     # C. Relative Volume (RVOL)
     df['Avg_Vol'] = df['Volume'].rolling(20).mean()
     df['RVOL'] = df['Volume'] / df['Avg_Vol']
 
-    # D. Volatility
+    # D. Volatility Thresholds
     df['Vol'] = df['Close'].pct_change().rolling(20).std() * (252**0.5) * 100
     df['Threshold'] = df['Vol'].rolling(60).mean() + (1.5 * df['Vol'].rolling(60).std())
 
     # --- 4. UI RENDERING ---
     st.title(f"🚀 {ticker} Conviction Terminal")
     
+    # Metrics
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Price", f"${df['Close'].iloc[-1]:.2f}")
-    c2.metric("RVOL (Whale Activity)", f"{df['RVOL'].iloc[-1]:.1f}x")
+    c2.metric("RVOL (Whales)", f"{df['RVOL'].iloc[-1]:.1f}x")
     c3.metric("Fear Index", f"{df['Vol'].iloc[-1]:.1f}%")
     
     flow_val = df['Net_Flow'].iloc[-1]
@@ -95,8 +96,8 @@ if status == "OK":
     fig.update_yaxes(tickformat="~s", secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Summary Box
-    st.subheader("🎯 Conviction Summary")
+    # Conviction Summary
+    st.subheader("🎯 Final Conviction Score")
     with st.container(border=True):
         col_a, col_b, col_c = st.columns(3)
         curr_rvol = df['RVOL'].iloc[-1]
@@ -114,13 +115,13 @@ if status == "OK":
             col_b.error("📉 **LAGGING MARKET**")
 
         if curr_rvol > 1.2 and curr_rs > 1 and curr_flow > 0:
-            col_c.markdown("### 🏹 SIGNAL: BUY")
+            col_c.markdown("### 🏹 SIGNAL: HIGH-CERTAINTY BUY")
         elif curr_flow < 0:
-            col_c.markdown("### 🛡️ SIGNAL: SELL")
+            col_c.markdown("### 🛡️ SIGNAL: SELL / AVOID")
         else:
-            col_c.markdown("### ⚖️ SIGNAL: WAIT")
+            col_c.markdown("### ⚖️ SIGNAL: NEUTRAL")
 
 elif status == "LIMIT":
-    st.warning("⚠️ Alpha Vantage Daily Limit. Please wait a minute or upgrade.")
+    st.warning("⚠️ Alpha Vantage Daily Limit Reached. Wait a minute and refresh.")
 else:
     st.error(f"Error: {status}")
