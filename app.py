@@ -15,29 +15,40 @@ if "." not in ticker: ticker += ".US" # EODHD requires the .US suffix
 @st.cache_data(ttl=3600)
 def get_pro_flow_data(symbol):
     try:
-        # 1. Get Historical Price Data
-        price_url = f"https://eodhd.com/api/eod/{symbol}?api_token={API_KEY}&fmt=json&period=d"
-        p_res = requests.get(price_url).json()
-        df_price = pd.DataFrame(p_res).set_index('date')
+        # 1. Price Call
+        price_url = f"https://eodhd.com/api/eod/{symbol}?api_token={API_KEY}&fmt=json"
+        p_res = requests.get(price_url)
+        
+        if p_res.status_code != 200 or not p_res.text:
+            st.error("Invalid API Key or Ticker. Check your EODHD dashboard.")
+            return None
+        
+        df_price = pd.DataFrame(p_res.json()).set_index('date')
         df_price.index = pd.to_datetime(df_price.index)
 
-        # 2. Get Historical Shares Outstanding (The Secret Sauce)
-        # In 2026, EODHD provides this via the Fundamentals filter
+        # 2. Shares Call (Safety Check)
         fund_url = f"https://eodhd.com/api/fundamentals/{symbol}?api_token={API_KEY}&filter=outstandingShares"
-        f_res = requests.get(fund_url).json()
+        f_res = requests.get(fund_url)
         
-        # Convert dictionary history to DataFrame
-        df_shares = pd.DataFrame.from_dict(f_res, orient='index', columns=['shares'])
-        df_shares.index = pd.to_datetime(df_shares.index)
+        # If this part fails, we just return the price data so the app doesn't break
+        if f_res.status_code == 200 and f_res.text:
+            f_data = f_res.json()
+            # If the response is a dictionary of dates, convert it
+            if isinstance(f_data, dict):
+                df_shares = pd.DataFrame.from_dict(f_data, orient='index', columns=['shares'])
+                df_shares.index = pd.to_datetime(df_shares.index)
+                merged = df_price.merge(df_shares, left_index=True, right_index=True, how='left')
+                merged['shares'] = merged['shares'].ffill()
+                return merged
         
-        # Merge Price and Shares
-        merged = df_price.merge(df_shares, left_index=True, right_index=True, how='left')
-        merged['shares'] = merged['shares'].ffill() # Fill gaps between reports
+        # Fallback: Return just price data if shares are missing
+        df_price['shares'] = np.nan
+        return df_price
         
-        return merged
     except Exception as e:
-        st.error(f"Error fetching Pro data: {e}")
+        st.warning(f"Note: Historical shares unavailable for this ticker on your plan. {e}")
         return None
+   
 
 data = get_pro_flow_data(ticker)
 
