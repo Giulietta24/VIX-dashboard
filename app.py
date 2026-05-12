@@ -1,88 +1,81 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import requests
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# --- Configuration ---
-st.set_page_config(page_title="2026 ETF Command Center", layout="wide")
-st.title("📊 2026 ETF Money Flow & Fear Dashboard")
+# --- SETUP ---
+API_KEY = st.secrets["EOD_KEY"]
+st.set_page_config(page_title="Pro ETF Flow Terminal", layout="wide")
 
-# 1. Sidebar Input
-ticker = st.sidebar.text_input("Enter ETF Ticker", "PAVE").upper()
-lookback = st.sidebar.slider("Days to Analyze", 5, 60, 20)
+ticker = st.sidebar.text_input("Enter Ticker (e.g. SPY.US)", "SPY.US").upper()
+if "." not in ticker: ticker += ".US" # EODHD requires the .US suffix
 
 @st.cache_data(ttl=3600)
-def get_all_data(symbol):
+def get_pro_flow_data(symbol):
     try:
-        t = yf.Ticker(symbol)
-        hist = t.history(period="1y")
-        # Get Implied Vol (IV)
-        expiries = t.options
-        iv = None
-        if expiries:
-            opt = t.option_chain(expiries[0])
-            iv = (opt.calls['impliedVolatility'].median() + opt.puts['impliedVolatility'].median()) / 2 * 100
-        return hist, t.info, iv
-    except:
-        return None, None, None
+        # 1. Get Historical Price Data
+        price_url = f"https://eodhd.com/api/eod/{symbol}?api_token={API_KEY}&fmt=json&period=d"
+        p_res = requests.get(price_url).json()
+        df_price = pd.DataFrame(p_res).set_index('date')
+        df_price.index = pd.to_datetime(df_price.index)
 
-hist, info, iv = get_all_data(ticker)
+        # 2. Get Historical Shares Outstanding (The Secret Sauce)
+        # In 2026, EODHD provides this via the Fundamentals filter
+        fund_url = f"https://eodhd.com/api/fundamentals/{symbol}?api_token={API_KEY}&filter=outstandingShares"
+        f_res = requests.get(fund_url).json()
+        
+        # Convert dictionary history to DataFrame
+        df_shares = pd.DataFrame.from_dict(f_res, orient='index', columns=['shares'])
+        df_shares.index = pd.to_datetime(df_shares.index)
+        
+        # Merge Price and Shares
+        merged = df_price.merge(df_shares, left_index=True, right_index=True, how='left')
+        merged['shares'] = merged['shares'].ffill() # Fill gaps between reports
+        
+        return merged
+    except Exception as e:
+        st.error(f"Error fetching Pro data: {e}")
+        return None
 
-if hist is not None and not hist.empty:
-    # --- CALCULATION: DYNAMIC MONEY FLOW ---
-    # We calculate 'Typical Price' to determine money direction
-    hist['Typical_Price'] = (hist['High'] + hist['Low'] + hist['Close']) / 3
-    hist['Money_Flow'] = hist['Typical_Price'] * hist['Volume']
-    
-    # Direction: If today's typical price > yesterday's, it's an INFLOW
-    hist['Flow_Dir'] = np.where(hist['Typical_Price'] > hist['Typical_Price'].shift(1), 
-                                hist['Money_Flow'], -hist['Money_Flow'])
-    
-    # Historical Volatility (The Proxy VIX)
-    hist['Returns'] = np.log(hist['Close'] / hist['Close'].shift(1))
-    hist['HV'] = hist['Returns'].rolling(window=20).std() * np.sqrt(252) * 100
-    
-    # --- ROW 1: METRICS ---
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Price", f"${hist['Close'].iloc[-1]:.2f}")
-    m2.metric("Assets (AUM)", f"${info.get('totalAssets', 0)/1e9:.2f}B")
-    m3.metric("Fear (Hist Vol)", f"{hist['HV'].iloc[-1]:.1f}%")
-    m4.metric("IV (Forward)", f"{iv:.1f}%" if iv else "N/A")
+data = get_pro_flow_data(ticker)
 
-    # --- ROW 2: PRICE & FLOW CHART ---
-    st.subheader(f"📈 {ticker} Price & Net Money Flow")
+if data is not None:
+    # --- CALCULATE NET FLOWS ---
+    # Flow = Change in Shares * Price
+    data['Share_Delta'] = data['shares'].diff()
+    data['Net_Flow_USD'] = data['Share_Delta'] * data['close']
+    
+    # --- DASHBOARD UI ---
+    st.title(f"🏛️ {ticker} Institutional Intelligence")
+    
+    col1, col2 = st.columns(2)
+    col1.metric("Current AUM Estimate", f"${(data['shares'].iloc[-1] * data['close'].iloc[-1])/1e9:.2f}B")
+    
+    # --- CHART: THE FLOWS ---
+    st.subheader("Institutional Net Flow (Creation/Redemption)")
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
     # Price Line
-    fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name="Price", line=dict(color="#1f77b4", width=3)), secondary_y=False)
+    fig.add_trace(go.Scatter(x=data.index, y=data['close'], name="Price", line=dict(color="white")), secondary_y=False)
     
-    # Flow Bars (Limited to user selection)
-    recent = hist.tail(lookback)
+    # Net Flow Bars (Last 60 Days)
+    recent = data.tail(60)
     fig.add_trace(go.Bar(
         x=recent.index, 
-        y=recent['Flow_Dir'],
-        name="Net Money Flow",
-        marker_color=np.where(recent['Flow_Dir'] >= 0, '#26a69a', '#ef5350'),
-        opacity=0.6
+        y=recent['Net_Flow_USD'],
+        name="Net Capital Flow ($)",
+        marker_color=np.where(recent['Net_Flow_USD'] >= 0, '#26a69a', '#ef5350')
     ), secondary_y=True)
     
-    fig.update_layout(height=500, legend=dict(orientation="h", y=1.1, x=1))
+    fig.update_layout(template="plotly_dark", height=600)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- ROW 3: FEAR GAUGE (VIX) ---
-    st.subheader("🔥 Volatility & Sentiment Signals")
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=hist.index, y=hist['HV'], name="Fear Index", fill='tozeroy', line=dict(color="orange")))
-    fig2.add_hline(y=30, line_dash="dash", line_color="red", annotation_text="PANIC ZONE")
-    st.plotly_chart(fig2, use_container_width=True)
-
-    # --- AI ADVISORY ---
-    st.info(f"**Current Status for {ticker}:** " + 
-            ("Accumulation (Money entering)" if hist['Flow_Dir'].iloc[-1] > 0 else "Distribution (Money exiting)") + 
-            " | " + 
-            ("High Risk/Volatility" if hist['HV'].iloc[-1] > 30 else "Stable/Low Volatility"))
+    # --- FEAR GAUGE ---
+    st.subheader("🔥 Volatility (Fear)")
+    data['Vol'] = data['close'].pct_change().rolling(20).std() * (252**0.5) * 100
+    st.line_chart(data['Vol'])
 
 else:
-    st.error("Invalid Ticker. Please try again.")
+    st.warning("Enter your API Key and a valid ticker to see institutional flows.")
