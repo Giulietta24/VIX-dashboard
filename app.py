@@ -4,98 +4,85 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import os
 
-# --- Page Setup ---
-st.set_page_config(page_title="2026 ETF Intelligence", layout="wide")
-st.title("📊 2026 ETF Capital Flow & Fear Tracker")
+# --- Configuration ---
+st.set_page_config(page_title="2026 ETF Command Center", layout="wide")
+st.title("📊 2026 ETF Money Flow & Fear Dashboard")
 
-# 1. DEFINE TICKER FIRST (Fixes NameError)
-ticker = st.sidebar.text_input("Enter Ticker (e.g., PAVE, SMH, XLK)", "PAVE").upper()
+# 1. Sidebar Input
+ticker = st.sidebar.text_input("Enter ETF Ticker", "PAVE").upper()
+lookback = st.sidebar.slider("Days to Analyze", 5, 60, 20)
 
-# --- FUNCTIONS ---
 @st.cache_data(ttl=3600)
-def get_market_data(symbol):
+def get_all_data(symbol):
     try:
         t = yf.Ticker(symbol)
         hist = t.history(period="1y")
-        return hist, t.info
-    except:
-        return None, None
-
-@st.cache_data(ttl=3600)
-def get_implied_vol(symbol):
-    try:
-        t = yf.Ticker(symbol)
+        # Get Implied Vol (IV)
         expiries = t.options
-        if not expiries: return None
-        
-        # Pick expiry approx 30 days out
-        target_expiry = expiries[0]
-        for date in expiries:
-            days_out = (pd.to_datetime(date) - pd.Timestamp.today()).days
-            if days_out > 20:
-                target_expiry = date
-                break
-        
-        opt = t.option_chain(target_expiry)
-        if opt.calls.empty or opt.puts.empty: return None
-        
-        calls_iv = opt.calls['impliedVolatility'].median()
-        puts_iv = opt.puts['impliedVolatility'].median()
-        return (calls_iv + puts_iv) / 2 * 100
+        iv = None
+        if expiries:
+            opt = t.option_chain(expiries[0])
+            iv = (opt.calls['impliedVolatility'].median() + opt.puts['impliedVolatility'].median()) / 2 * 100
+        return hist, t.info, iv
     except:
-        return None
+        return None, None, None
 
-# --- EXECUTION ---
-hist, info = get_market_data(ticker)
-ticker_iv = get_implied_vol(ticker)
+hist, info, iv = get_all_data(ticker)
 
 if hist is not None and not hist.empty:
-    # Calculate Historical Vol (VIX Proxy)
+    # --- CALCULATION: DYNAMIC MONEY FLOW ---
+    # We calculate 'Typical Price' to determine money direction
+    hist['Typical_Price'] = (hist['High'] + hist['Low'] + hist['Close']) / 3
+    hist['Money_Flow'] = hist['Typical_Price'] * hist['Volume']
+    
+    # Direction: If today's typical price > yesterday's, it's an INFLOW
+    hist['Flow_Dir'] = np.where(hist['Typical_Price'] > hist['Typical_Price'].shift(1), 
+                                hist['Money_Flow'], -hist['Money_Flow'])
+    
+    # Historical Volatility (The Proxy VIX)
     hist['Returns'] = np.log(hist['Close'] / hist['Close'].shift(1))
-    hist['VIX_Proxy'] = hist['Returns'].rolling(window=20).std() * np.sqrt(252) * 100
-    current_vix = hist['VIX_Proxy'].iloc[-1]
-
-    # --- TOP METRICS ---
+    hist['HV'] = hist['Returns'].rolling(window=20).std() * np.sqrt(252) * 100
+    
+    # --- ROW 1: METRICS ---
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Price", f"${hist['Close'].iloc[-1]:.2f}")
-    m2.metric("Shares Out", f"{info.get('sharesOutstanding', 0):,}")
-    m3.metric("Fear (Hist)", f"{current_vix:.1f}%")
+    m2.metric("Assets (AUM)", f"${info.get('totalAssets', 0)/1e9:.2f}B")
+    m3.metric("Fear (Hist Vol)", f"{hist['HV'].iloc[-1]:.1f}%")
+    m4.metric("IV (Forward)", f"{iv:.1f}%" if iv else "N/A")
+
+    # --- ROW 2: PRICE & FLOW CHART ---
+    st.subheader(f"📈 {ticker} Price & Net Money Flow")
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    if ticker_iv:
-        m4.metric("IV (Forward)", f"{ticker_iv:.1f}%")
-    else:
-        m4.metric("IV (Forward)", "N/A")
+    # Price Line
+    fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name="Price", line=dict(color="#1f77b4", width=3)), secondary_y=False)
+    
+    # Flow Bars (Limited to user selection)
+    recent = hist.tail(lookback)
+    fig.add_trace(go.Bar(
+        x=recent.index, 
+        y=recent['Flow_Dir'],
+        name="Net Money Flow",
+        marker_color=np.where(recent['Flow_Dir'] >= 0, '#26a69a', '#ef5350'),
+        opacity=0.6
+    ), secondary_y=True)
+    
+    fig.update_layout(height=500, legend=dict(orientation="h", y=1.1, x=1))
+    st.plotly_chart(fig, use_container_width=True)
 
-    # --- CHART 1: PRICE & FLOWS ---
-    st.subheader("💳 Price vs. Capital Flow")
-    if os.path.exists('flow_history.csv'):
-        flow_df = pd.read_csv('flow_history.csv')
-        flow_df['Date'] = pd.to_datetime(flow_df['Date'])
-        flow_df['Daily_Change'] = flow_df['Shares'].diff()
-
-        fig1 = make_subplots(specs=[[{"secondary_y": True}]])
-        fig1.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name="Price", line=dict(color="#1f77b4")), secondary_y=False)
-        fig1.add_trace(go.Bar(x=flow_df['Date'], y=flow_df['Daily_Change'], name="Share Flow", marker_color="green", opacity=0.4), secondary_y=True)
-        st.plotly_chart(fig1, use_container_width=True)
-    else:
-        st.line_chart(hist['Close'])
-        st.info("Recording daily flows... check back tomorrow for bars.")
-
-    # --- CHART 2: THE VIX GAUGE ---
-    st.subheader("🔥 Volatility & Sentiment")
+    # --- ROW 3: FEAR GAUGE (VIX) ---
+    st.subheader("🔥 Volatility & Sentiment Signals")
     fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=hist.index, y=hist['VIX_Proxy'], name="Historical Vol", line=dict(color="orange")))
-    fig2.add_hline(y=30, line_dash="dash", line_color="red", annotation_text="Panic Zone")
+    fig2.add_trace(go.Scatter(x=hist.index, y=hist['HV'], name="Fear Index", fill='tozeroy', line=dict(color="orange")))
+    fig2.add_hline(y=30, line_dash="dash", line_color="red", annotation_text="PANIC ZONE")
     st.plotly_chart(fig2, use_container_width=True)
 
-    # --- ALPHA ALERTS ---
-    if ticker_iv and current_vix:
-        if ticker_iv > current_vix + 10:
-            st.warning(f"⚠️ **High IV Skew:** Option traders are pricing in a major move soon.")
-        elif current_vix > 35:
-            st.error("🚨 **Panic detected:** Potential capitulation/bottoming area.")
+    # --- AI ADVISORY ---
+    st.info(f"**Current Status for {ticker}:** " + 
+            ("Accumulation (Money entering)" if hist['Flow_Dir'].iloc[-1] > 0 else "Distribution (Money exiting)") + 
+            " | " + 
+            ("High Risk/Volatility" if hist['HV'].iloc[-1] > 30 else "Stable/Low Volatility"))
 
 else:
-    st.error("Ticker data unavailable.")
+    st.error("Invalid Ticker. Please try again.")
