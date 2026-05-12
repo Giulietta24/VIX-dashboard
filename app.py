@@ -1,123 +1,85 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import requests
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
 
-# --- 1. SETUP & THEME ---
-st.set_page_config(page_title="2026 ETF Intelligence", layout="wide")
-st.title("📊 ETF Capital Flow & Fear Tracker")
+# --- 1. ACCESS SECRETS ---
+try:
+    AV_KEY = st.secrets["AV_KEY"]
+except:
+    st.error("Please add 'AV_KEY' to your Streamlit Secrets.")
+    st.stop()
 
-# Sidebar for Ticker Input
-ticker = st.sidebar.text_input("Enter Ticker (e.g., PAVE, SMH, SPY)", "PAVE").upper()
+st.set_page_config(page_title="ETF Flow Tracker 2026", layout="wide")
+ticker = st.sidebar.text_input("Enter Ticker", "SPY").upper()
 
-# --- 2. DATA ENGINE (With Rate Limit Protection) ---
-@st.cache_data(ttl=86400) 
-def get_clean_data(symbol):
+# --- 2. THE DATA ENGINE ---
+@st.cache_data(ttl=3600)
+def get_alpha_data(symbol):
     try:
-        # Simplified: No manual session. yfinance handles it better internally now.
-        t = yf.Ticker(symbol)
-        hist = t.history(period="1y")
+        # Fetch Daily Adjusted Price
+        url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol}&apikey={AV_KEY}&outputsize=compact'
+        r = requests.get(url)
+        data = r.json()
         
-        if hist.empty:
-            return None, None, None
-            
-        # Get Implied Volatility (IV)
-        iv = None
-        try:
-            if t.options:
-                opt = t.option_chain(t.options[0])
-                iv = (opt.calls['impliedVolatility'].median() + opt.puts['impliedVolatility'].median()) / 2 * 100
-        except:
-            iv = None
-                
-        return hist, t.info, iv
+        # Check for Alpha Vantage Rate Limits
+        if "Note" in data:
+            return "LIMIT", None
+        
+        df = pd.DataFrame.from_dict(data['Time Series (Daily)'], orient='index')
+        df = df.astype(float)
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        
+        # Standardize column names
+        df = df.rename(columns={
+            '1. open': 'Open', '2. high': 'High', 
+            '3. low': 'Low', '4. close': 'Close', '6. volume': 'Volume'
+        })
+        return "OK", df
     except Exception as e:
-        st.error(f"Data Fetch Error: {e}")
-        return None, None, None
-            
-        # Get Implied Volatility (IV)
-        iv = None
-        if t.options:
-            try:
-                opt = t.option_chain(t.options[0])
-                iv = (opt.calls['impliedVolatility'].median() + opt.puts['impliedVolatility'].median()) / 2 * 100
-            except:
-                iv = None
-                
-        return hist, t.info, iv
-    except Exception as e:
-        st.error(f"Data Fetch Error: {e}")
-        return None, None, None
+        return str(e), None
 
-# --- 3. EXECUTION ---
-hist, info, iv = get_clean_data(ticker)
+status, df = get_alpha_data(ticker)
 
-if hist is not None:
-    # --- CALCULATE FLOWS & VOLATILITY ---
-    # Typical Price Money Flow Logic
-    hist['TP'] = (hist['High'] + hist['Low'] + hist['Close']) / 3
-    hist['Flow'] = hist['TP'] * hist['Volume']
-    hist['Net_Flow'] = np.where(hist['Close'] > hist['Close'].shift(1), hist['Flow'], -hist['Flow'])
+# --- 3. DASHBOARD RENDERING ---
+if status == "OK":
+    # --- FLOW CALCULATIONS ---
+    df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['Net_Flow'] = np.where(df['Close'] > df['Close'].shift(1), 
+                              df['TP'] * df['Volume'], -df['TP'] * df['Volume'])
+    df['Flow_EMA'] = df['Net_Flow'].ewm(span=10).mean()
     
-    # Smooth Trend Line (The "Institutional Trend")
-    hist['Flow_Trend'] = hist['Net_Flow'].ewm(span=10).mean()
+    # VIX Proxy (Volatility)
+    df['Vol'] = df['Close'].pct_change().rolling(20).std() * (252**0.5) * 100
 
-    # VIX Proxy (Historical Volatility)
-    hist['Returns'] = np.log(hist['Close'] / hist['Close'].shift(1))
-    hist['VIX_Proxy'] = hist['Returns'].rolling(window=20).std() * np.sqrt(252) * 100
-    curr_vix = hist['VIX_Proxy'].iloc[-1]
+    st.title(f"📊 {ticker} Intelligence Terminal")
+    
+    # Metrics
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Price", f"${df['Close'].iloc[-1]:.2f}")
+    c2.metric("Fear (VIX)", f"{df['Vol'].iloc[-1]:.1f}%")
+    c3.metric("Daily Flow", f"${df['Net_Flow'].iloc[-1]/1e6:.1f}M")
 
-    # --- ROW 1: TOP METRICS ---
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Price", f"${hist['Close'].iloc[-1]:.2f}")
-    m2.metric("Fear (VIX)", f"{curr_vix:.1f}%")
-    m3.metric("Option IV", f"{iv:.1f}%" if iv else "N/A")
-    m4.metric("Assets (AUM)", f"${info.get('totalAssets', 0)/1e9:.2f}B")
-
-    # --- ROW 2: MAIN CHART ---
-    st.subheader(f"📈 {ticker} Price vs. Net Capital Flow")
+    # --- CHART 1: PRICE & FLOWS ---
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-    # Price Line
-    fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name="Price", line=dict(color="#1f77b4", width=3)), secondary_y=False)
-
-    # Net Flow Bars (Last 50 Days)
-    recent = hist.tail(50)
-    fig.add_trace(go.Bar(
-        x=recent.index, 
-        y=recent['Net_Flow'],
-        name="Net Money Flow",
-        marker_color=np.where(recent['Net_Flow'] >= 0, '#26a69a', '#ef5350'),
-        opacity=0.4
-    ), secondary_y=True)
-
-    # Flow Trend Line
-    fig.add_trace(go.Scatter(
-        x=recent.index, y=recent['Flow_Trend'], 
-        name="Flow Trend", 
-        line=dict(color="#00fbff", width=2)
-    ), secondary_y=True)
-
-    fig.update_layout(height=550, template="plotly_dark", hovermode="x unified", legend=dict(orientation="h", y=1.1))
+    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", line=dict(color="white")), secondary_y=False)
+    
+    recent = df.tail(40)
+    fig.add_trace(go.Bar(x=recent.index, y=recent['Net_Flow'], name="Flow", 
+                         marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), opacity=0.4), secondary_y=True)
+    
+    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", line=dict(color="#00fbff")), secondary_y=True)
+    fig.update_layout(template="plotly_dark", height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- ROW 3: VOLATILITY GAUGE ---
-    st.subheader("🔥 Volatility & Fear Signal")
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=hist.index, y=hist['VIX_Proxy'], name="VIX Proxy", line=dict(color="orange"), fill='tozeroy'))
-    fig2.add_hline(y=30, line_dash="dash", line_color="red", annotation_text="Panic Zone")
-    fig2.update_layout(height=350, template="plotly_dark")
-    st.plotly_chart(fig2, use_container_width=True)
+    # --- CHART 2: FEAR ---
+    st.subheader("🔥 Volatility Gauge")
+    st.area_chart(df['Vol'])
 
-    # --- ALPHA ALERTS ---
-    if iv and iv > curr_vix + 10:
-        st.warning(f"⚠️ **High IV Skew:** Option traders are pricing in a major move soon for {ticker}.")
-    if curr_vix > 30:
-        st.error(f"🚨 **Panic Zone:** {ticker} is experiencing extreme volatility.")
-
+elif status == "LIMIT":
+    st.warning("⚠️ Alpha Vantage Free Limit Reached (25 requests/day). Please wait a minute or upgrade.")
 else:
-    st.error("No data found for this ticker. Try SPY, PAVE, or SMH.")
-    st.info("If you see a 'Rate Limit' error, wait a few minutes and try again—Streamlit Cloud IPs are shared.")
+    st.error(f"Error: {status}")
