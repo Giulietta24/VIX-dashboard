@@ -4,7 +4,7 @@ import requests
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import time  # New import for the delay
+import time
 
 # --- 1. SETUP & SECRETS ---
 try:
@@ -16,52 +16,35 @@ except:
 st.set_page_config(page_title="High-Certainty Terminal", layout="wide")
 ticker = st.sidebar.text_input("Enter Ticker", "SPY").upper()
 
-# --- 2. THE DATA ENGINE (With Anti-Crash Delay) ---
+# --- 2. DATA ENGINE ---
 @st.cache_data(ttl=3600)
 def get_full_market_data(symbol):
     try:
-        # Request 1: Target Ticker
         url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={AV_KEY}'
-        r = requests.get(url)
-        data = r.json()
+        r = requests.get(url).json()
+        if "Note" in r: return "LIMIT", None, None
         
-        if "Note" in data: return "LIMIT", None, None
-        if "Error Message" in data: return "INVALID", None, None
-        if 'Time Series (Daily)' not in data: return "API_REJECTION", None, None
-
-        # DELAY: Give the API a break (Free tier requirement)
-        time.sleep(2) 
-
-        # Request 2: SPY Benchmark
-        url_spy = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&apikey={AV_KEY}'
-        r_spy = requests.get(url_spy)
-        data_spy = r_spy.json()
-        
-        if 'Time Series (Daily)' not in data_spy: return "LIMIT", None, None
-
-        # Process Main Ticker
-        df = pd.DataFrame.from_dict(data['Time Series (Daily)'], orient='index').astype(float)
+        df = pd.DataFrame.from_dict(r['Time Series (Daily)'], orient='index').astype(float)
         df.index = pd.to_datetime(df.index)
         df = df.sort_index().rename(columns={'1. open':'Open','2. high':'High','3. low':'Low','4. close':'Close','5. volume':'Volume'})
         
-        # Process SPY
-        spy = pd.DataFrame.from_dict(data_spy['Time Series (Daily)'], orient='index').astype(float)
-        spy.index = pd.to_datetime(spy.index)
+        # Short delay to prevent API rejection for the benchmark
+        time.sleep(1.5)
+        
+        url_spy = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&apikey={AV_KEY}'
+        r_spy = requests.get(url_spy).json()
+        spy = pd.DataFrame.from_dict(r_spy['Time Series (Daily)'], orient='index').astype(float)
         spy = spy.sort_index()['4. close']
+        spy.index = pd.to_datetime(spy.index)
 
-        # Sync dates
-        common_dates = df.index.intersection(spy.index)
-        df = df.loc[common_dates]
-        spy = spy.loc[common_dates]
-
-        return "OK", df, spy
+        common = df.index.intersection(spy.index)
+        return "OK", df.loc[common], spy.loc[common]
     except Exception as e:
         return str(e), None, None
 
-# Trigger Data Fetch
 status, df, spy_price = get_full_market_data(ticker)
 
-# --- 3. UI RENDERING ---
+# --- 3. DASHBOARD LOGIC ---
 if status == "OK":
     # MATH
     df['TP'] = (df['High'] + df['Low'] + df['Close']) / 3
@@ -74,7 +57,17 @@ if status == "OK":
 
     st.title(f"🚀 {ticker} Conviction Terminal")
     
-    # Visuals
+    # --- TOP METRICS ---
+    flow_val = df['Net_Flow'].iloc[-1]
+    flow_disp = f"${flow_val/1e9:.1f}B" if abs(flow_val) >= 1e9 else f"${flow_val/1e6:.1f}M"
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Current Price", f"${df['Close'].iloc[-1]:.2f}")
+    m2.metric("Whale Activity (RVOL)", f"{df['RVOL'].iloc[-1]:.1f}x")
+    m3.metric("Fear Level", f"{df['Vol'].iloc[-1]:.1f}%")
+    m4.metric("Inst. Flow", flow_disp)
+
+    # --- CHART 1: FLOW ---
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", line=dict(color="#003366", width=3)), secondary_y=False)
     
@@ -82,21 +75,34 @@ if status == "OK":
     fig.add_trace(go.Bar(x=recent.index, y=recent['Net_Flow'], name="Net Flow", 
                          marker_color=np.where(recent['Net_Flow']>0, '#26a69a', '#ef5350'), opacity=0.4), secondary_y=True)
     
-    fig.update_layout(template="plotly_white", height=500, paper_bgcolor="white", font=dict(color="black"), hovermode="x unified")
+    # Adding back the Trend Line
+    fig.add_trace(go.Scatter(x=recent.index, y=recent['Flow_EMA'], name="Flow Trend", line=dict(color="#007bff", width=2)), secondary_y=True)
+    
+    fig.update_layout(template="plotly_white", height=450, paper_bgcolor="white", font=dict(color="black"), hovermode="x unified")
     fig.update_yaxes(tickformat="~s", secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Verdict
-    st.subheader("🎯 Conviction Summary")
-    with st.container(border=True):
-        if df['Net_Flow'].iloc[-1] > 0 and df['RVOL'].iloc[-1] > 1.2:
-            st.success("🏹 **HIGH CONVICTION BUY:** Institutional flow + High Volume + Market Strength.")
-        else:
-            st.info("⚖️ **NEUTRAL:** Waiting for whale confirmation.")
+    # --- CHART 2: FEAR GAUGE ---
+    st.subheader("🔥 Dynamic Panic Threshold")
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=df.index, y=df['Vol'], name="Volatility", fill='tozeroy', line=dict(color="orange")))
+    fig2.add_trace(go.Scatter(x=df.index, y=df['Threshold'], name="Panic Line", line=dict(color="red", dash="dash")))
+    fig2.update_layout(template="plotly_white", height=300)
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # --- CONVICTION SUMMARY ---
+    st.subheader("🎯 Verdict")
+    curr_flow = df['Net_Flow'].iloc[-1]
+    curr_rvol = df['RVOL'].iloc[-1]
+    
+    if curr_flow > 0 and curr_rvol > 1.2:
+        st.success("🏹 **BUY SIGNAL:** Institutions are buying on high volume.")
+    elif curr_flow < 0 and curr_rvol > 1.2:
+        st.error("🛡️ **SELL SIGNAL:** High-volume institutional exit detected.")
+    else:
+        st.info("⚖️ **NEUTRAL:** No major whale activity detected right now.")
 
 elif status == "LIMIT":
-    st.error("🚨 **Daily Limit Reached (25/day).** Try a new API key or wait 24 hours.")
-elif status == "API_REJECTION":
-    st.warning("⚠️ **API Busy.** Refresh the page in 5 seconds to try again.")
+    st.error("🚨 API Limit Reached (25/day).")
 else:
     st.error(f"Error: {status}")
